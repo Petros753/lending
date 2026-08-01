@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>LifeWeeks</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<!-- Chart.js лежит рядом, а не на CDN: Mini App не должен зависеть от чужого
+     хоста, а у части пользователей CDN-домены недоступны. -->
+<script src="vendor/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #14171c);
+    --card: var(--tg-theme-secondary-bg-color, #1c2027);
+    --text: var(--tg-theme-text-color, #f2f4f7);
+    --muted: var(--tg-theme-hint-color, #8b93a1);
+    --accent: var(--tg-theme-button-color, #4c8dff);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --line: rgba(255, 255, 255, .09);
+
+    /* Палитра оценок. Хороший/плохой различаются не только тоном, но и
+       светлотой — чтобы сетка читалась при цветовой слепоте. */
+    --good: #4ade80;
+    --neutral: #fbbf24;
+    --bad: #f87171;
+    --skipped: #4b5563;
+    /* Прожитая и будущая неделя должны различаться с одного взгляда,
+       поэтому между ними кратная разница в заливке, а не оттенок. */
+    --lived: rgba(139, 147, 161, .5);
+    --future: rgba(139, 147, 161, .12);
+    --radius: 14px;
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  body {
+    margin: 0;
+    padding: 0 0 76px;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior-y: none;
+  }
+
+  .wrap { max-width: 640px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 12px; font-weight: 600; }
+  p  { margin: 0 0 12px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .center { text-align: center; }
+
+  .card {
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+
+  button {
+    font: inherit;
+    border: 0;
+    cursor: pointer;
+    border-radius: 10px;
+    color: var(--text);
+    background: transparent;
+  }
+
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 13px;
+    background: var(--accent);
+    color: var(--accent-text);
+    font-weight: 600;
+    border-radius: 12px;
+  }
+  .btn:disabled { opacity: .45; }
+  .btn.ghost { background: var(--card); color: var(--text); }
+
+  input[type="date"], input[type="time"], select {
+    width: 100%;
+    padding: 12px;
+    font: inherit;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  /* ---- нижняя навигация ---- */
+  nav {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    display: flex;
+    background: var(--card);
+    border-top: 1px solid var(--line);
+    padding-bottom: env(safe-area-inset-bottom);
+    z-index: 10;
+  }
+  nav button {
+    flex: 1;
+    padding: 10px 4px;
+    font-size: 11px;
+    color: var(--muted);
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    border-radius: 0;
+  }
+  nav button.active { color: var(--accent); }
+  nav button span.ico { font-size: 19px; line-height: 1; }
+
+  .screen { display: none; }
+  .screen.active { display: block; }
+
+  /* ---- сетка недель ---- */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(26, 1fr);
+    gap: 3px;
+    margin: 12px 0;
+  }
+  .cell {
+    aspect-ratio: 1;
+    border-radius: 2px;
+    background: var(--future);
+  }
+  .cell.lived     { background: var(--lived); }
+  .cell.good      { background: var(--good); }
+  .cell.neutral   { background: var(--neutral); }
+  .cell.bad       { background: var(--bad); }
+  .cell.current   { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .pager { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
+  .pager button { padding: 8px 14px; background: var(--card); }
+  .pager button:disabled { opacity: .35; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); }
+  .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 5px; }
+
+  /* ---- чек-ин ---- */
+  .ratings { display: flex; gap: 10px; }
+  .ratings button {
+    flex: 1;
+    padding: 18px 6px;
+    background: var(--bg);
+    border: 2px solid var(--line);
+    border-radius: 14px;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+  }
+  .ratings button .emoji { font-size: 30px; line-height: 1; }
+  .ratings button .label { font-size: 12px; color: var(--muted); }
+  .ratings button.selected { border-color: var(--accent); background: var(--card); }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .stat { background: var(--card); border-radius: var(--radius); padding: 14px 10px; text-align: center; }
+  .stat .value { font-size: 22px; font-weight: 700; }
+  .stat .name { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .chart-box { position: relative; height: 220px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .row:last-child { margin-bottom: 0; }
+  .row label { font-size: 14px; }
+  .row .control { flex: 0 0 auto; width: 150px; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 92px; transform: translateX(-50%);
+    background: var(--card); color: var(--text);
+    padding: 10px 18px; border-radius: 999px; font-size: 13px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.35);
+    opacity: 0; pointer-events: none; transition: opacity .2s;
+    z-index: 20;
+  }
+  .toast.show { opacity: 1; }
+
+  .switch { position: relative; width: 46px; height: 27px; }
+  .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; }
+  .switch .track {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: var(--line); transition: background .15s; pointer-events: none;
+  }
+  .switch .track::after {
+    content: ''; position: absolute; top: 3px; left: 3px;
+    width: 21px; height: 21px; border-radius: 50%; background: #fff;
+    transition: transform .15s;
+  }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::after { transform: translateX(19px); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <!-- ======================= ЗАГРУЗКА ======================= -->
+  <section id="screen-loading" class="screen active">
+    <div class="card center" style="margin-top:40vh">
+      <p class="muted">Загружаем…</p>
+    </div>
+  </section>
+
+  <!-- ======================= ОНБОРДИНГ ======================= -->
+  <section id="screen-onboarding" class="screen">
+    <div style="margin-top:12vh">
+      <h1>Вся жизнь в неделях</h1>
+      <p class="muted">
+        Каждый квадрат — одна неделя. Отмечайте, как прошёл день,
+        и по понедельникам смотрите отчёт за прошедшую неделю.
+      </p>
+      <div class="card">
+        <h2>Когда вы родились?</h2>
+        <input type="date" id="onboardingBirthDate">
+        <p class="muted" style="margin:10px 0 0">
+          Дата нужна, чтобы посчитать номер вашей недели. Её можно изменить позже.
+        </p>
+      </div>
+      <button class="btn" id="onboardingSubmit" disabled>Продолжить</button>
+    </div>
+  </section>
+
+  <!-- ======================= СЕТКА ======================= -->
+  <section id="screen-grid" class="screen">
+    <h1 id="gridTitle">Недели жизни</h1>
+    <p class="muted" id="gridSubtitle"></p>
+
+    <div class="stats" style="margin:14px 0">
+      <div class="stat"><div class="value" id="statWeek">—</div><div class="name">неделя</div></div>
+      <div class="stat"><div class="value" id="statAge">—</div><div class="name">лет</div></div>
+      <div class="stat"><div class="value" id="statStreak">—</div><div class="name">дней подряд</div></div>
+    </div>
+
+    <div class="card">
+      <div class="pager">
+        <button id="gridPrev">←</button>
+        <div class="muted center" id="gridRange" style="flex:1"></div>
+        <button id="gridNext">→</button>
+      </div>
+      <div class="grid" id="weeksGrid"></div>
+      <div class="legend">
+        <span><i style="background:var(--good)"></i>хорошая</span>
+        <span><i style="background:var(--neutral)"></i>средняя</span>
+        <span><i style="background:var(--bad)"></i>тяжёлая</span>
+        <span><i style="background:var(--lived)"></i>прожита</span>
+        <span><i style="background:var(--future)"></i>впереди</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= СЕГОДНЯ ======================= -->
+  <section id="screen-today" class="screen">
+    <h1>Как прошёл день?</h1>
+    <p class="muted" id="todayDate"></p>
+
+    <div class="card">
+      <div class="ratings" id="todayRatings">
+        <button data-rating="good"><span class="emoji">🙂</span><span class="label">хорошо</span></button>
+        <button data-rating="neutral"><span class="emoji">😐</span><span class="label">нейтрально</span></button>
+        <button data-rating="bad"><span class="emoji">🙁</span><span class="label">плохо</span></button>
+      </div>
+      <p class="muted center" id="todayHint" style="margin:12px 0 0">
+        Оценку можно поменять в любой момент до конца дня.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Последние 14 дней</h2>
+      <div class="chart-box" style="height:150px"><canvas id="chartRecent"></canvas></div>
+    </div>
+  </section>
+
+  <!-- ======================= ОТЧЁТ ======================= -->
+  <section id="screen-report" class="screen">
+    <h1>Отчёт за неделю</h1>
+    <div class="pager" style="margin-bottom:14px">
+      <button id="reportPrev">←</button>
+      <div class="center" id="reportRange" style="flex:1"></div>
+      <button id="reportNext">→</button>
+    </div>
+
+    <div class="stats" style="margin-bottom:12px">
+      <div class="stat"><div class="value" id="reportGood">0</div><div class="name">🙂 хороших</div></div>
+      <div class="stat"><div class="value" id="reportNeutral">0</div><div class="name">😐 средних</div></div>
+      <div class="stat"><div class="value" id="reportBad">0</div><div class="name">🙁 плохих</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Соотношение дней</h2>
+      <div class="chart-box"><canvas id="chartDonut"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2>По дням недели</h2>
+      <div class="chart-box"><canvas id="chartDays"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h2>Динамика за 12 недель</h2>
+      <div class="chart-box"><canvas id="chartTrend"></canvas></div>
+      <p class="muted" id="reportTrendNote" style="margin:10px 0 0"></p>
+    </div>
+  </section>
+
+  <!-- ======================= НАСТРОЙКИ ======================= -->
+  <section id="screen-settings" class="screen">
+    <h1>Настройки</h1>
+
+    <div class="card">
+      <h2>Дата рождения</h2>
+      <input type="date" id="settingsBirthDate">
+      <button class="btn" id="settingsSaveBirth" style="margin-top:10px">Сохранить</button>
+      <p class="muted" style="margin:10px 0 0">
+        Отметки дней привязаны к календарным датам, поэтому смена даты рождения
+        просто пересчитывает номера недель — история сохраняется.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Уведомления</h2>
+      <div class="row">
+        <label for="settingsNotifications">Присылать напоминания</label>
+        <span class="switch">
+          <input type="checkbox" id="settingsNotifications" checked>
+          <span class="track"></span>
+        </span>
+      </div>
+      <div class="row">
+        <label for="settingsDailyTime">Вечерний вопрос</label>
+        <span class="control"><input type="time" id="settingsDailyTime" value="20:00"></span>
+      </div>
+      <div class="row">
+        <label for="settingsWeeklyTime">Отчёт в понедельник</label>
+        <span class="control"><input type="time" id="settingsWeeklyTime" value="09:00"></span>
+      </div>
+      <div class="row">
+        <label for="settingsTimezone">Часовой пояс</label>
+        <span class="control"><select id="settingsTimezone"></select></span>
+      </div>
+      <button class="btn" id="settingsSave">Сохранить</button>
+    </div>
+
+    <p class="muted center" id="settingsFooter"></p>
+  </section>
+</div>
+
+<nav id="tabs">
+  <button data-screen="grid"><span class="ico">▦</span>Сетка</button>
+  <button data-screen="today"><span class="ico">◉</span>Сегодня</button>
+  <button data-screen="report"><span class="ico">📊</span>Отчёт</button>
+  <button data-screen="settings"><span class="ico">⚙</span>Ещё</button>
+</nav>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var CONFIG = {
+    // Python-бэкенд за nginx (раньше здесь был n8n-вебхук).
+    // Путь относительный: Mini App и API отдаёт один и тот же хост, поэтому
+    // конфиг не надо править под прод/стенд/локальную отладку.
+    API_BASE: '/api',
+    WEEKS_PER_PAGE: 130,   // 26 колонок × 5 строк — ровно 2.5 года на экран
+    TREND_WEEKS: 12,
+    LIFE_EXPECTANCY_YEARS: 90
+  };
+
+  var tg = window.Telegram && window.Telegram.WebApp;
+  var state = {
+    user: null,
+    weeksByIndex: {},   // индекс недели жизни → агрегат
+    gridPage: 0,
+    reportWeekStart: null,
+    reportLoaded: false,
+    charts: {}
+  };
+
+  // ------------------------------------------------------------------
+  // утилиты
+  // ------------------------------------------------------------------
+
+  function $(id) { return document.getElementById(id); }
+
+  var DAY_MS = 86400000;
+
+  function parseDate(iso) {
+    // Разбираем вручную: new Date('2026-08-01') — это UTC-полночь, и в
+    // отрицательных таймзонах она уезжает на день назад.
+    var p = String(iso).split('-');
+    return new Date(+p[0], +p[1] - 1, +p[2]);
+  }
+
+  function toISO(date) {
+    var m = date.getMonth() + 1, d = date.getDate();
+    return date.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (d < 10 ? '0' : '') + d;
+  }
+
+  function addDays(date, days) {
+    var copy = new Date(date.getTime());
+    copy.setDate(copy.getDate() + days);
+    return copy;
+  }
+
+  function fmtShort(date) {
+    return date.getDate() + '.' + ('0' + (date.getMonth() + 1)).slice(-2);
+  }
+
+  /** Номер недели жизни (1-based) для даты `on`. */
+  function weeksFromBirth(birthDate, on) {
+    var birth = typeof birthDate === 'string' ? parseDate(birthDate) : birthDate;
+    var target = on ? (typeof on === 'string' ? parseDate(on) : on) : new Date();
+    // Считаем по календарным суткам, а не по миллисекундам: иначе переход
+    // на летнее время сдвигает результат на неделю раз в полгода.
+    var days = Math.floor((Date.UTC(target.getFullYear(), target.getMonth(), target.getDate())
+      - Date.UTC(birth.getFullYear(), birth.getMonth(), birth.getDate())) / DAY_MS);
+    return Math.floor(days / 7) + 1;
+  }
+
+  function haptic(kind) {
+    try { tg.HapticFeedback.impactOccurred(kind || 'light'); } catch (e) { /* не критично */ }
+  }
+
+  var toastTimer;
+  function toast(message) {
+    var el = $('toast');
+    el.textContent = message;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.remove('show'); }, 1800);
+  }
+
+  // ------------------------------------------------------------------
+  // API
+  // ------------------------------------------------------------------
+
+  /**
+   * Запрос к бэкенду. initData уходит заголовком — сервер проверяет его
+   * подпись и берёт telegram_id оттуда, поэтому id в теле не нужен.
+   */
+  function apiRequest(endpoint, data, method) {
+    var options = {
+      method: method || 'POST',
+      headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '' }
+    };
+    var url = CONFIG.API_BASE + '/' + endpoint;
+
+    if (options.method === 'GET') {
+      var query = [];
+      for (var key in data || {}) {
+        if (data[key] !== null && data[key] !== undefined) {
+          query.push(encodeURIComponent(key) + '=' + encodeURIComponent(data[key]));
+        }
+      }
+      if (query.length) { url += '?' + query.join('&'); }
+    } else {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(data || {});
+    }
+
+    return fetch(url, options).then(function (response) {
+      return response.text().then(function (text) {
+        var body;
+        try { body = text ? JSON.parse(text) : {}; } catch (e) { body = { detail: text }; }
+        if (!response.ok) {
+          var detail = body && body.detail;
+          if (Array.isArray(detail)) { detail = detail[0] && detail[0].msg; }
+          throw new Error(detail || ('HTTP ' + response.status));
+        }
+        return body;
+      });
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // навигация
+  // ------------------------------------------------------------------
+
+  function show(name) {
+    var screens = document.querySelectorAll('.screen');
+    for (var i = 0; i < screens.length; i++) { screens[i].classList.remove('active'); }
+    var target = $('screen-' + name);
+    if (target) { target.classList.add('active'); }
+
+    var buttons = document.querySelectorAll('#tabs button');
+    for (var j = 0; j < buttons.length; j++) {
+      buttons[j].classList.toggle('active', buttons[j].dataset.screen === name);
+    }
+    $('tabs').style.display = (name === 'onboarding' || name === 'loading') ? 'none' : 'flex';
+    window.scrollTo(0, 0);
+
+    // Chart.js замеряет контейнер в момент создания графика. Если экран был
+    // скрыт (display:none), ширина равна нулю и график схлопывается в полоску,
+    // поэтому после показа экрана пересчитываем размеры.
+    for (var id in state.charts) { state.charts[id].resize(); }
+
+    if (name === 'report' && !state.reportLoaded) {
+      state.reportLoaded = true;
+      loadReport(state.reportWeekStart);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // сетка недель
+  // ------------------------------------------------------------------
+
+  function renderGrid() {
+    var user = state.user;
+    if (!user || !user.birth_date) { return; }
+
+    var birth = parseDate(user.birth_date);
+    var currentIndex = user.life_week - 1;
+    var total = user.total_weeks || CONFIG.LIFE_EXPECTANCY_YEARS * 52;
+    var pages = Math.ceil(total / CONFIG.WEEKS_PER_PAGE);
+
+    if (state.gridPage < 0) { state.gridPage = 0; }
+    if (state.gridPage > pages - 1) { state.gridPage = pages - 1; }
+
+    var first = state.gridPage * CONFIG.WEEKS_PER_PAGE;
+    var last = Math.min(first + CONFIG.WEEKS_PER_PAGE, total);
+
+    var html = '';
+    for (var i = first; i < last; i++) {
+      var week = state.weeksByIndex[i];
+      var cls = 'cell';
+      if (week && week.score !== null) {
+        cls += ' ' + (week.score >= 0.67 ? 'good' : week.score >= 0.34 ? 'neutral' : 'bad');
+      } else if (i < currentIndex) {
+        cls += ' lived';
+      }
+      if (i === currentIndex) { cls += ' current'; }
+      html += '<div class="' + cls + '"></div>';
+    }
+    $('weeksGrid').innerHTML = html;
+
+    var fromAge = Math.floor(first / 52);
+    var toAge = Math.floor((last - 1) / 52);
+    $('gridRange').textContent = fromAge === toAge
+      ? fromAge + ' год жизни'
+      : fromAge + '–' + toAge + ' годы жизни';
+    $('gridPrev').disabled = state.gridPage === 0;
+    $('gridNext').disabled = state.gridPage >= pages - 1;
+
+    $('gridSubtitle').textContent =
+      'Прожито ' + user.life_week + ' из ~' + total + ' недель · ' +
+      Math.round(user.life_week / total * 100) + '%';
+    $('statWeek').textContent = user.life_week;
+    $('statAge').textContent = user.age;
+    $('statStreak').textContent = user.streak;
+  }
+
+  function loadGrid() {
+    return apiRequest('life-weeks', null, 'GET').then(function (data) {
+      state.weeksByIndex = {};
+      data.weeks.forEach(function (week) { state.weeksByIndex[week.index] = week; });
+      // При первом открытии показываем страницу с текущей неделей.
+      state.gridPage = Math.floor((data.current_week - 1) / CONFIG.WEEKS_PER_PAGE);
+      renderGrid();
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // сегодня
+  // ------------------------------------------------------------------
+
+  var WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+
+  function renderToday() {
+    var user = state.user;
+    var today = parseDate(user.today);
+    $('todayDate').textContent = 'Сегодня, ' + WEEKDAYS[today.getDay()] + ', ' + fmtShort(today);
+
+    var buttons = document.querySelectorAll('#todayRatings button');
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].classList.toggle('selected', buttons[i].dataset.rating === user.today_rating);
+    }
+    $('todayHint').textContent = user.today_rating
+      ? 'Записано. Можно поменять до конца дня.'
+      : 'Оценку можно поменять в любой момент до конца дня.';
+  }
+
+  function rateToday(rating) {
+    haptic('medium');
+    return apiRequest('rate-day', { date: state.user.today, rating: rating })
+      .then(function (result) {
+        state.user.today_rating = result.rating;
+        $('statStreak').textContent = result.streak;
+        renderToday();
+        toast('Записано');
+        // Сетка и график недавних дней зависят от новой отметки.
+        return Promise.all([loadGrid(), loadRecent()]);
+      })
+      .catch(function (error) { toast(error.message); });
+  }
+
+  function loadRecent() {
+    refreshColors();
+    var to = parseDate(state.user.today);
+    var from = addDays(to, -13);
+    return apiRequest('checkins', { from: toISO(from), to: toISO(to) }, 'GET')
+      .then(function (data) {
+        var byDate = {};
+        data.items.forEach(function (item) { byDate[item.date] = item.rating; });
+
+        var labels = [], values = [], colors = [];
+        for (var i = 0; i < 14; i++) {
+          var day = addDays(from, i);
+          var rating = byDate[toISO(day)];
+          labels.push(fmtShort(day));
+          values.push(rating ? BAR_VALUE[rating] : 0);
+          colors.push(rating ? COLORS[rating] : COLORS.skipped);
+        }
+        drawBar('chartRecent', labels, values, colors);
+      });
+  }
+
+  // ------------------------------------------------------------------
+  // отчёт
+  // ------------------------------------------------------------------
+
+  // Высота столбика по оценке. Плохой день — это 1, а не 0: столбик нулевой
+  // высоты визуально неотличим от дня без отметки.
+  var BAR_VALUE = { good: 3, neutral: 2, bad: 1 };
+  var AXIS_TICKS = { 1: '🙁', 2: '😐', 3: '🙂' };
+  var COLORS = {};
+
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function refreshColors() {
+    COLORS = {
+      good: cssVar('--good'),
+      neutral: cssVar('--neutral'),
+      bad: cssVar('--bad'),
+      skipped: cssVar('--skipped')
+    };
+  }
+
+  function destroyChart(id) {
+    if (state.charts[id]) { state.charts[id].destroy(); delete state.charts[id]; }
+  }
+
+  function baseOptions(yMin) {
+    var muted = cssVar('--muted');
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        ? false : { duration: 400 },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: function (item) {
+              return item.parsed.y ? AXIS_TICKS[Math.round(item.parsed.y)] : 'без оценки';
+            }
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { color: muted, font: { size: 10 } }, grid: { display: false } },
+        y: {
+          min: yMin === undefined ? 0 : yMin,
+          max: 3,
+          ticks: {
+            color: muted, stepSize: 1,
+            callback: function (value) { return AXIS_TICKS[value] || ''; }
+          },
+          grid: { color: cssVar('--line') }
+        }
+      }
+    };
+  }
+
+  function drawBar(canvasId, labels, values, colors) {
+    destroyChart(canvasId);
+    state.charts[canvasId] = new Chart($(canvasId), {
+      type: 'bar',
+      data: { labels: labels, datasets: [{ data: values, backgroundColor: colors, borderRadius: 4 }] },
+      options: baseOptions()
+    });
+  }
+
+  function renderReport(report) {
+    var start = parseDate(report.week_start);
+    var end = parseDate(report.week_end);
+    $('reportRange').innerHTML = '<b>' + report.life_week + '-я неделя</b><br>' +
+      '<span class="muted">' + fmtShort(start) + ' — ' + fmtShort(end) + '</span>';
+    $('reportNext').disabled = !report.has_next;
+
+    $('reportGood').textContent = report.counts.good;
+    $('reportNeutral').textContent = report.counts.neutral;
+    $('reportBad').textContent = report.counts.bad;
+
+    // ---- бублик: соотношение дней
+    destroyChart('chartDonut');
+    var donutValues = [report.counts.good, report.counts.neutral, report.counts.bad, report.counts.skipped];
+    state.charts.chartDonut = new Chart($('chartDonut'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Хорошие', 'Нейтральные', 'Плохие', 'Без оценки'],
+        datasets: [{
+          data: donutValues,
+          backgroundColor: [COLORS.good, COLORS.neutral, COLORS.bad, COLORS.skipped],
+          borderWidth: 0
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '62%',
+        plugins: {
+          legend: { position: 'bottom', labels: { color: cssVar('--muted'), boxWidth: 12, font: { size: 11 } } }
+        }
+      }
+    });
+
+    // ---- столбики по дням недели
+    var names = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    var labels = [], values = [], colors = [];
+    report.days.forEach(function (day, index) {
+      labels.push(names[index]);
+      values.push(day.rating ? BAR_VALUE[day.rating] : 0);
+      colors.push(day.rating ? COLORS[day.rating] : COLORS.skipped);
+    });
+    drawBar('chartDays', labels, values, colors);
+  }
+
+  function loadReport(weekStart) {
+    return apiRequest('week-report', weekStart ? { week_start: weekStart } : null, 'GET')
+      .then(function (report) {
+        state.reportWeekStart = report.week_start;
+        refreshColors();
+        renderReport(report);
+        return loadTrend(report.week_start);
+      })
+      .catch(function (error) { toast(error.message); });
+  }
+
+  /** Линия среднего настроения по неделям — считается из плоского списка чек-инов. */
+  function loadTrend(weekStart) {
+    var end = addDays(parseDate(weekStart), 6);
+    var start = addDays(parseDate(weekStart), -7 * (CONFIG.TREND_WEEKS - 1));
+
+    return apiRequest('checkins', { from: toISO(start), to: toISO(end) }, 'GET')
+      .then(function (data) {
+        var byDate = {};
+        data.items.forEach(function (item) { byDate[item.date] = item.rating; });
+
+        var labels = [], values = [], rated = 0;
+        for (var w = 0; w < CONFIG.TREND_WEEKS; w++) {
+          var weekBegin = addDays(start, w * 7);
+          var sum = 0, count = 0;
+          for (var d = 0; d < 7; d++) {
+            var rating = byDate[toISO(addDays(weekBegin, d))];
+            if (rating) { sum += BAR_VALUE[rating]; count++; }
+          }
+          labels.push(fmtShort(weekBegin));
+          // Недели без единой отметки рвут линию, а не притворяются нулём.
+          values.push(count ? +(sum / count).toFixed(3) : null);
+          rated += count;
+        }
+
+        destroyChart('chartTrend');
+        // Ось тренда стартует с 1: среднее по оценкам ниже единицы не бывает.
+        var options = baseOptions(1);
+        state.charts.chartTrend = new Chart($('chartTrend'), {
+          type: 'line',
+          data: {
+            labels: labels,
+            datasets: [{
+              data: values,
+              borderColor: cssVar('--accent'),
+              backgroundColor: 'transparent',
+              borderWidth: 2,
+              tension: 0.3,
+              pointRadius: 3,
+              pointBackgroundColor: cssVar('--accent'),
+              spanGaps: false
+            }]
+          },
+          options: options
+        });
+
+        $('reportTrendNote').textContent = rated
+          ? 'Точки — среднее настроение за неделю. Разрыв означает неделю без отметок.'
+          : 'Пока нет данных: отмечайте дни, и здесь появится динамика.';
+      });
+  }
+
+  // ------------------------------------------------------------------
+  // настройки
+  // ------------------------------------------------------------------
+
+  var TIMEZONES = [
+    'Europe/Kaliningrad', 'Europe/Moscow', 'Europe/Samara', 'Asia/Yekaterinburg',
+    'Asia/Omsk', 'Asia/Krasnoyarsk', 'Asia/Irkutsk', 'Asia/Yakutsk',
+    'Asia/Vladivostok', 'Asia/Magadan', 'Asia/Kamchatka',
+    'Europe/Kyiv', 'Europe/Minsk', 'Asia/Almaty', 'Asia/Tbilisi', 'Asia/Yerevan',
+    'Asia/Bangkok', 'Asia/Dubai', 'Europe/Belgrade', 'Europe/Berlin',
+    'Europe/Lisbon', 'Europe/London', 'America/New_York', 'America/Los_Angeles', 'UTC'
+  ];
+
+  function fillTimezones(current) {
+    var select = $('settingsTimezone');
+    var options = TIMEZONES.slice();
+    if (current && options.indexOf(current) === -1) { options.unshift(current); }
+    select.innerHTML = options.map(function (zone) {
+      return '<option value="' + zone + '">' + zone.replace(/_/g, ' ') + '</option>';
+    }).join('');
+    select.value = current || 'Europe/Moscow';
+  }
+
+  function renderSettings() {
+    var user = state.user;
+    $('settingsBirthDate').value = user.birth_date || '';
+    $('settingsNotifications').checked = user.notifications;
+    $('settingsDailyTime').value = (user.daily_time || '20:00:00').slice(0, 5);
+    $('settingsWeeklyTime').value = (user.weekly_time || '09:00:00').slice(0, 5);
+    fillTimezones(user.timezone);
+    $('settingsFooter').textContent = 'Отмечено дней: ' + (user.checkins_total || 0);
+  }
+
+  function saveSettings() {
+    var button = $('settingsSave');
+    button.disabled = true;
+    return apiRequest('settings', {
+      timezone: $('settingsTimezone').value,
+      daily_time: $('settingsDailyTime').value,
+      weekly_time: $('settingsWeeklyTime').value,
+      notifications: $('settingsNotifications').checked
+    })
+      .then(function (user) {
+        state.user = user;
+        renderSettings();
+        toast('Сохранено');
+      })
+      .catch(function (error) { toast(error.message); })
+      .finally(function () { button.disabled = false; });
+  }
+
+  function saveBirthDate(value, button) {
+    if (!value) { toast('Укажите дату'); return Promise.resolve(); }
+    if (button) { button.disabled = true; }
+    return apiRequest('set-birthdate', { birth_date: value })
+      .then(function (user) {
+        state.user = user;
+        state.reportLoaded = false;
+        toast('Дата сохранена');
+        return bootAuthenticated();
+      })
+      .catch(function (error) { toast(error.message); })
+      .finally(function () { if (button) { button.disabled = false; } });
+  }
+
+  // ------------------------------------------------------------------
+  // старт
+  // ------------------------------------------------------------------
+
+  function bootAuthenticated() {
+    var user = state.user;
+    if (!user.birth_date) {
+      show('onboarding');
+      return Promise.resolve();
+    }
+
+    renderToday();
+    renderSettings();
+    $('gridTitle').textContent = user.first_name
+      ? user.first_name + ', ваша жизнь в неделях'
+      : 'Недели жизни';
+
+    refreshColors();
+
+    // Глубокая ссылка из понедельничного сообщения ведёт сразу в отчёт.
+    // show() сам подгрузит отчёт при первом открытии вкладки.
+    var startParam = tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param;
+    show(startParam === 'report' ? 'report' : 'grid');
+
+    return Promise.all([loadGrid(), loadRecent()]);
+  }
+
+  function boot() {
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      if (tg.setHeaderColor) {
+        try { tg.setHeaderColor('secondary_bg_color'); } catch (e) { /* старый клиент */ }
+      }
+      tg.onEvent('themeChanged', function () {
+        refreshColors();
+        if (state.reportWeekStart) { loadReport(state.reportWeekStart); }
+      });
+    }
+
+    var maxBirth = toISO(new Date());
+    $('onboardingBirthDate').max = maxBirth;
+    $('settingsBirthDate').max = maxBirth;
+
+    apiRequest('get-user')
+      .then(function (user) {
+        state.user = user;
+        return bootAuthenticated();
+      })
+      .catch(function (error) {
+        show('onboarding');
+        toast('Не удалось связаться с сервером: ' + error.message);
+      });
+  }
+
+  // ---- обработчики ----
+
+  $('onboardingBirthDate').addEventListener('change', function () {
+    $('onboardingSubmit').disabled = !this.value;
+  });
+  $('onboardingSubmit').addEventListener('click', function () {
+    saveBirthDate($('onboardingBirthDate').value, this);
+  });
+  $('settingsSaveBirth').addEventListener('click', function () {
+    saveBirthDate($('settingsBirthDate').value, this);
+  });
+  $('settingsSave').addEventListener('click', saveSettings);
+
+  document.querySelectorAll('#todayRatings button').forEach(function (button) {
+    button.addEventListener('click', function () { rateToday(this.dataset.rating); });
+  });
+
+  document.querySelectorAll('#tabs button').forEach(function (button) {
+    button.addEventListener('click', function () {
+      haptic();
+      show(this.dataset.screen);
+    });
+  });
+
+  $('gridPrev').addEventListener('click', function () { state.gridPage--; renderGrid(); });
+  $('gridNext').addEventListener('click', function () { state.gridPage++; renderGrid(); });
+
+  $('reportPrev').addEventListener('click', function () {
+    loadReport(toISO(addDays(parseDate(state.reportWeekStart), -7)));
+  });
+  $('reportNext').addEventListener('click', function () {
+    loadReport(toISO(addDays(parseDate(state.reportWeekStart), 7)));
+  });
+
+  boot();
+})();
+</script>
+</body>
+</html>

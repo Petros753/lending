@@ -1,0 +1,30 @@
+[Unit]
+Description=LifeWeeks — API, Telegram-бот и планировщик рассылок
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/lifeweeks/backend
+ExecStart=/opt/lifeweeks/venv/bin/python -m app.main
+
+# EnvironmentFile здесь намеренно нет: .env читает сам pydantic-settings
+# из каталога backend/. Один источник правды вместо двух парсеров одного файла.
+Restart=always
+RestartSec=5
+
+# Бот, API и APScheduler живут в одном процессе, поэтому у сервиса
+# один worker: второй экземпляр начал бы дублировать рассылки и
+# конфликтовать за long polling Telegram.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lifeweeks
+
+# Мягкие ограничения — сервер общий с другими проектами.
+MemoryMax=512M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
